@@ -25,6 +25,7 @@ sub new {
     $bool = 'perl' unless defined $bool;
     my $schemas = delete $args{schema} || ['+'];
     my $cyclic_refs = delete $args{cyclic_refs} || 'allow';
+    my $limit = delete $args{limit};
     my $indent = delete $args{indent};
     my $writer = delete $args{writer};
     my $header = delete $args{header};
@@ -65,6 +66,7 @@ sub new {
         parser => $parser,
         default_yaml_version => $default_yaml_version,
         preserve => $preserve,
+        limit => $limit,
     );
     my $dumper = YAML::PP::Dumper->new(
         schema => $default_schema,
