@@ -13,17 +13,17 @@ jobs:
     strategy:
       matrix:
         perl-version:
-        - '5.8'
-        - '5.10'
-        - '5.12'
-        - '5.14'
-        - '5.16'
-        - '5.18'
-        - '5.20'
-        - '5.22'
-        - '5.24'
-        - '5.26'
-        - '5.28'
+#        - '5.8'
+#        - '5.10'
+#        - '5.12'
+#        - '5.14'
+#        - '5.16'
+#        - '5.18'
+#        - '5.20'
+#        - '5.22'
+#        - '5.24'
+#        - '5.26'
+#        - '5.28'
         - '5.30'
 
     container:
@@ -31,6 +31,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - run: env
     - run: perl -V
     - name: Add testsuite worktree
       run: |
@@ -46,8 +47,18 @@ jobs:
       run: >
         cpanm --quiet --notest
         Module::Load Test::Deep Test::Warn Test::More
-    - name: Run Tests
-      run: prove -lr t
+        Sub::Retry Furl Test::MockObject Test::Mock::Time
+        Test::Mock::Guard Test::Requires::Git Cwd::Guard JSON::XS
+        Devel::Cover URI Module::Find Capture::Tiny IO::Socket::SSL
+#    - name: Run Tests
+#      run: prove -lr t
+    - run: git clone --depth 1 https://github.com/perlpunk/codecov-perl -b github-actions
+    - name: codecov
+      run: |
+        export PERL5LIB=$PWD/codecov-perl/lib:$PERL5LIB
+        PERL5OPT="-MDevel::Cover=-db,cover_db,-select,^lib,-ignore,^t/|bin/prove|^examples" prove -lr t/00.compile.t
+        cover -report codecov
+
 
 # GitHub actions doesn't support YAML aliases :(
 #  codecov:
