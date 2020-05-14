@@ -56,7 +56,7 @@ jobs:
     - name: codecov
       run: |
         export PERL5LIB=$PWD/codecov-perl/lib:$PERL5LIB
-        PERL5OPT="-MDevel::Cover=-db,cover_db,-select,^lib,-ignore,^t/|bin/prove|^examples" prove -lr t/00.compile.t
+        PERL5OPT="-MDevel::Cover=-db,cover_db,-select,^lib,-ignore,^t/|bin/prove|^examples" prove -lr t/00.compile.t 15.parse-eol.t
         cover -report codecov
 
 

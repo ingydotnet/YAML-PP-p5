@@ -12,8 +12,8 @@ perl:
 #  - "5.22"
 #  - "5.24"
 #  - "5.26"
-#  - "5.28"
-  - "5.30"
+  - "5.28"
+#  - "5.30"
 
 sudo: false             # faster builds as long as you don't need sudo access
 
@@ -27,7 +27,7 @@ script:
     perl -v | grep 'v5.30'
     if [[ $? -eq 0 ]]; then
         echo "Testing with Devel::Cover"
-        PERL5OPT="-MDevel::Cover=-db,cover_db,-select,^lib,-ignore,^t/|bin/prove|^examples" prove -lr t/00.compile.t
+        PERL5OPT="-MDevel::Cover=-db,cover_db,-select,^lib,-ignore,^t/|bin/prove|^examples" prove -lr t/00.compile.t t/15.parse-eol.t
         cover -report codecov
     else
       prove -lr t
