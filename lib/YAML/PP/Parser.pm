@@ -110,6 +110,7 @@ sub init {
     $self->set_tokens([]);
     $self->set_rule(undef);
     $self->set_event_stack([]);
+    $self->{flow_nodes} = [];
     $self->set_yaml_version($self->default_yaml_version);
     $self->set_yaml_version_directive(undef);
     $self->lexer->init;
@@ -137,6 +138,7 @@ my %nodetypes = (
     FLOWMAPVALUE => 'NODETYPE_FLOWMAPVALUE',
     FLOWSEQ      => 'NODETYPE_FLOWSEQ',
     FLOWSEQ_NEXT => 'FLOWSEQ_NEXT',
+    IMAPVALUE    => 'NODETYPE_IMAPVALUE',
     DOC          => 'FULLNODE',
     DOC_END      => 'DOCUMENT_END',
     STR          => 'STREAM',
@@ -158,6 +160,7 @@ sub parse {
         $self->end_stream;
     };
     if (my $error = $@) {
+        $self->flush_flow_nodes;
         if (ref $error) {
             croak "$error\n ";
         }
@@ -182,7 +185,7 @@ sub lex_next_tokens {
     my $next = $next_tokens->[0];
 
     return 1 if ($next->{name} ne 'SPACE');
-    my $flow = $event_types->[-1] =~ m/^FLOW/;
+    my $flow = $event_types->[-1] =~ m/^(?:FLOW|IMAP)/;
     my $space = length $next->{value};
     my $tokens = $self->tokens;
 
@@ -373,6 +376,7 @@ sub parse_tokens {
         }
         TRACE and warn __PACKAGE__.':'.__LINE__.$".Data::Dumper->Dump([\$next_tokens->[0]], ['next_token']);
         my $got = $next_tokens->[0]->{name};
+        $self->flush_flow_nodes if $got eq 'EOL';
         if ($got eq 'CONTEXT') {
             my $context = shift @$next_tokens;
             my $indent = $offsets->[-1];
@@ -536,7 +540,7 @@ sub start_flow_sequence {
         $new_offset = 0;
     }
     elsif ($self->new_node) {
-        if ($event_types->[-1] !~ m/^FLOW/) {
+        if ($event_types->[-1] !~ m/^(?:FLOW|IMAP)/) {
             $new_offset++;
         }
     }
@@ -548,7 +552,7 @@ sub start_flow_sequence {
     if (@$event_stack and $event_stack->[-1]->[0] eq 'properties') {
         $self->fetch_inline_properties($event_stack, $info);
     }
-    $self->callback->($self, 'sequence_start_event', $info);
+    $self->start_flow_node($info, $offset);
 }
 
 sub start_flow_mapping {
@@ -560,7 +564,7 @@ sub start_flow_mapping {
         $new_offset = 0;
     }
     elsif ($self->new_node) {
-        if ($event_types->[-1] !~ m/^FLOW/) {
+        if ($event_types->[-1] !~ m/^(?:FLOW|IMAP)/) {
             $new_offset++;
         }
     }
@@ -572,7 +576,88 @@ sub start_flow_mapping {
     if (@$event_stack and $event_stack->[-1]->[0] eq 'properties') {
         $self->fetch_inline_properties($event_stack, $info);
     }
-    $self->callback->($self, 'mapping_start_event', $info);
+    if ($implicit_flowseq_map) {
+        $self->callback->($self, 'mapping_start_event', $info);
+    }
+    else {
+        $self->start_flow_node($info, $offset);
+    }
+}
+
+sub start_flow_node {
+    my ($self, $info, $offset) = @_;
+    my $parent = $self->events->[-2];
+    my $node = {
+        info => $info,
+        offset => defined $info->{offset} ? $info->{offset} : $offset,
+        line => $self->tokens->[-1]->{line},
+    };
+    my $candidate = $self->rule eq 'NODETYPE_SCALAR_OR_MAP'
+        || $parent eq 'FLOWSEQ';
+    my $stack = $self->event_stack;
+    if (@$stack and $stack->[-1]->[0] eq 'properties') {
+        $node->{properties} = pop @$stack;
+    }
+    push @{ $self->{flow_nodes} }, $node;
+    if ($candidate) {
+        $node->{callback} = $self->callback;
+        $node->{events} = [];
+        $self->set_callback(sub {
+            my ($parser, $event, $event_info) = @_;
+            push @{ $node->{events} }, [$event, $event_info];
+        });
+    }
+    elsif ($node->{properties}) {
+        $self->node_properties($node->{properties}->[1], $info);
+        delete $node->{properties};
+    }
+    $self->callback->($self, $info->{name}, $info);
+}
+
+sub flush_flow_node {
+    my ($self, $node) = @_;
+    my $events = delete $node->{events} or return;
+    $self->set_callback(delete $node->{callback});
+    if (my $properties = delete $node->{properties}) {
+        $self->node_properties($properties->[1], $node->{info});
+    }
+    for my $event (@$events) {
+        $self->callback->($self, @$event);
+    }
+}
+
+sub flush_flow_nodes {
+    my ($self) = @_;
+    for my $node (reverse @{ $self->{flow_nodes} }) {
+        $self->flush_flow_node($node);
+    }
+}
+
+sub end_flow_node {
+    my ($self, $info) = @_;
+    $self->callback->($self, $info->{name}, $info);
+    my $node = pop @{ $self->{flow_nodes} };
+    if ($node->{events}) {
+        my ($next) = grep { $_->{name} ne 'WS' }
+            @{ $self->lexer->next_tokens };
+        if ($next and $next->{name} eq 'COLON') {
+            if ($next->{column} - $node->{offset} > 1024) {
+                $self->flush_flow_node($node);
+                $self->exception('Implicit mapping key is too long');
+            }
+            $self->set_callback($node->{callback});
+            if (my $properties = delete $node->{properties}) {
+                push @{ $self->event_stack }, $properties;
+            }
+            if ($self->events->[-1] eq 'FLOWSEQ') {
+                $self->start_flow_mapping($node->{offset}, 1);
+            }
+            else {
+                $self->start_mapping($node->{offset});
+            }
+        }
+        $self->flush_flow_node($node);
+    }
 }
 
 sub end_flow_sequence {
@@ -581,9 +666,10 @@ sub end_flow_sequence {
     pop @{ $event_types };
     pop @{ $self->offset };
     my $info = { name => 'sequence_end_event' };
-    $self->callback->($self, $info->{name}, $info);
+    $self->end_flow_node($info);
     if ($event_types->[-1] =~ m/^FLOW|^IMAP/) {
         $event_types->[-1] = $next_event{ $event_types->[-1] };
+        $self->end_flow_mapping if $event_types->[-1] eq 'IMAP';
     }
     else {
         push @$event_types, 'END_FLOW';
@@ -593,12 +679,18 @@ sub end_flow_sequence {
 sub end_flow_mapping {
     my ($self) = @_;
     my $event_types = $self->events;
-    pop @{ $event_types };
+    my $type = pop @{ $event_types };
     pop @{ $self->offset };
     my $info = { name => 'mapping_end_event' };
-    $self->callback->($self, $info->{name}, $info);
+    if ($type eq 'IMAP') {
+        $self->callback->($self, $info->{name}, $info);
+    }
+    else {
+        $self->end_flow_node($info);
+    }
     if ($event_types->[-1] =~ m/^FLOW|^IMAP/) {
         $event_types->[-1] = $next_event{ $event_types->[-1] };
+        $self->end_flow_mapping if $event_types->[-1] eq 'IMAP';
     }
     else {
         push @$event_types, 'END_FLOW';
@@ -610,6 +702,15 @@ sub cb_end_outer_flow {
     my $event_types = $self->events;
     pop @$event_types;
     $event_types->[-1] = $next_event{ $event_types->[-1] };
+}
+
+sub cb_flow_key_colon {
+    my ($self) = @_;
+    unless ($self->events->[-2] eq 'MAP') {
+        $self->exception('Unexpected mapping value after flow collection');
+    }
+    $self->cb_end_outer_flow;
+    $self->set_new_node(1);
 }
 
 sub start_mapping {
